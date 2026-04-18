@@ -3,7 +3,7 @@
 > [!NOTE] 
 > the code in repo is AI assisted
 
-main grammar and treesitter logic is based on `kamaizen`
+main grammar and treesitter logic is based on [kamaizen](https://github.com/IbrahimShahzad/KamaiZen)
 
 ```sh
 KamaiZen/kamailio_cfg/parser.c          → cfg-format/grammar/parser.c
