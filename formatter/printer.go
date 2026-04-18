@@ -682,7 +682,8 @@ func (p *printer) printParenOrWrap(paren *sitter.Node, _ string) {
 
 // collectAndOrParts flattens a left-associative &&/|| chain into a flat slice
 // of operands and the operators between them.
-//   a && b && c  →  operands=[a,b,c]  ops=["&&","&&"]
+//
+//	a && b && c  →  operands=[a,b,c]  ops=["&&","&&"]
 func (p *printer) collectAndOrParts(n *sitter.Node) (operands []*sitter.Node, ops []string) {
 	// Unwrap expression wrapper nodes.
 	for n.Type() == "expression" && n.NamedChildCount() == 1 {

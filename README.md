@@ -11,14 +11,19 @@ KamaiZen/kamailio_cfg/include.h         → cfg-format/grammar/include.h
 KamaiZen/kamailio_cfg/tree_sitter/*.h   → cfg-format/grammar/tree_sitter/
 ```
 
-Installation
+## Pre-requisites
+
+- make sure you have [golang](https://go.dev/doc/install) installed.
+
+## Installation
 
 ```sh
-git clone this repo
+git clone https://github.com/IbrahimShahzad/cfg-format.git
 cd cfg-format
-go install
+make install
 ```
-usage
+
+## usage
 
 ```sh
 Usage: cfg-format [flags] [file ...]
@@ -35,4 +40,10 @@ Usage: cfg-format [flags] [file ...]
   -w    write result back to source file instead of stdout
   -width int
         max line length before if/while conditions are wrapped (default 79)
+```
+
+## uinstall
+
+```sh
+make uninstall
 ```
