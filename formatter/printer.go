@@ -130,7 +130,9 @@ func (p *printer) printNode(n *sitter.Node) {
 	case "file_starter":
 		// #!KAMAILIO — content spans the whole header, not just "#!"
 		p.raw(p.content(n))
-	case "preproc_def":
+	case "import_file", "include_file":
+		fallthrough
+	case "preproc_def", "preproc_trydef", "preproc_substdefs":
 		p.printPreprocDef(n)
 	// Preprocessor conditionals: reformat the enclosed body so indentation
 	// stays consistent with the surrounding code.
@@ -171,45 +173,98 @@ func (p *printer) printSourceFile(n *sitter.Node) {
 		return t == "comment" || t == "multiline_comment"
 	}
 	isRoute := func(t string) bool { return t == "routing_block" }
-	childInner := func(i int) string {
-		if i >= 0 && i < int(n.ChildCount()) {
-			return innerType(n.Child(i))
+
+	// isDocChainStart returns true when child i is the FIRST comment in a
+	// consecutive comment chain that immediately precedes a routing_block.
+	// Only this first comment gets the 2-blank-line gap; subsequent comments
+	// in the same chain are kept together with a single newline.
+	isDocChainStart := func(i int, prev string) bool {
+		if !isComment(innerType(n.Child(i))) {
+			return false
 		}
-		return ""
+		if isComment(prev) {
+			return false // not the first in the chain
+		}
+		for j := i + 1; j < int(n.ChildCount()); j++ {
+			t := innerType(n.Child(j))
+			if isRoute(t) {
+				return true
+			}
+			if !isComment(t) {
+				return false
+			}
+		}
+		return false
 	}
 
 	prevInner := ""
+	var prevEnd uint32
 	for i := range int(n.ChildCount()) {
 		child := n.Child(i)
 		curInner := innerType(child)
 
 		if i > 0 {
+			newlines := srcNewlines(p.src, prevEnd, child.StartByte())
+			// top_level_item nodes include the trailing '\n' in their EndByte,
+			// so the gap [prevEnd, child.StartByte()] has 0 newlines for
+			// consecutive lines. Count the trailing '\n' explicitly.
+			if prevEnd > 0 && p.src[prevEnd-1] == '\n' {
+				newlines++
+			}
 			switch {
+			case newlines == 0:
+				// Items share a source line (e.g. "system.x=0 desc "foo"").
+				p.raw(" ")
 			case isRoute(curInner) && isComment(prevInner):
 				// Doc comment attached to a route — keep them together.
 				p.raw("\n")
 			case isRoute(curInner), isRoute(prevInner):
-				// Before or after any route (no doc comment above): 2 blank lines.
+				// Always 2 blank lines before/after a route block.
 				p.blankLine()
 				p.blankLine()
-			case isComment(curInner) && isRoute(childInner(i+1)):
-				// Comment is a doc string for the next route — 2 blank lines
-				// go before the comment, not between the comment and the route.
+			case isDocChainStart(i, prevInner):
+				// First comment in a doc chain before a route — 2 blank lines
+				// before the chain starts, not between each comment.
 				p.blankLine()
 				p.blankLine()
 			default:
+				// Preserve blank lines from source between global declarations.
+				blanks := newlines - 1
+				for range blanks {
+					p.raw("\n")
+				}
 				p.raw("\n")
 			}
 		}
 
 		p.printNode(child)
 		prevInner = curInner
+		prevEnd = child.EndByte()
 	}
+}
+
+// srcNewlines counts the number of newline characters in src[from:to].
+func srcNewlines(src []byte, from, to uint32) int {
+	n := 0
+	for _, b := range src[from:to] {
+		if b == '\n' {
+			n++
+		}
+	}
+	return n
 }
 
 // ── Preprocessor conditionals ────────────────────────────────────────────────
 
 func (p *printer) printPreprocIfdef(n *sitter.Node) {
+	if preprocHasErrorChild(n) {
+		// The #!ifdef crosses structural block boundaries (e.g. wraps } else {).
+		// Reformatting would produce wrong output — emit the body verbatim and
+		// only ensure the directive lines start at column 0.
+		p.printPreprocIfdefVerbatim(n)
+		return
+	}
+
 	var prevEnd uint32
 	for i := range int(n.ChildCount()) {
 		child := n.Child(i)
@@ -254,6 +309,55 @@ func (p *printer) printPreprocIfdef(n *sitter.Node) {
 	}
 }
 
+// preprocHasErrorChild reports whether a preproc_ifdef/ifndef node (or its
+// preproc_else child) contains an ERROR node, which means the #!ifdef block
+// crosses structural boundaries like "} else {".
+func preprocHasErrorChild(n *sitter.Node) bool {
+	for i := range int(n.ChildCount()) {
+		child := n.Child(i)
+		if child.Type() == "ERROR" {
+			return true
+		}
+		if child.Type() == "preproc_else" {
+			for j := range int(child.ChildCount()) {
+				if child.Child(j).Type() == "ERROR" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// printPreprocIfdefVerbatim emits a preproc_ifdef whose body crosses block
+// boundaries. Directive lines (#!ifdef, #!else, #!endif) are forced to column
+// 0; the body between them is reproduced from the original source bytes.
+func (p *printer) printPreprocIfdefVerbatim(n *sitter.Node) {
+	var bodyStart uint32
+	for i := range int(n.ChildCount()) {
+		child := n.Child(i)
+		switch child.Type() {
+		case "#!ifdef", "#!ifndef":
+			p.raw(p.content(child))
+		case "identifier":
+			p.raw(" " + p.content(child))
+			bodyStart = child.EndByte()
+		case "#!endif":
+			// Emit everything between the last directive and #!endif verbatim.
+			p.raw(string(p.src[bodyStart:child.StartByte()]))
+			p.raw("\n")
+			p.raw(p.content(child))
+		case "preproc_else":
+			elseToken := child.Child(0) // "#!else"
+			// Body up to #!else
+			p.raw(string(p.src[bodyStart:elseToken.StartByte()]))
+			p.raw("\n")
+			p.raw(p.content(elseToken))
+			bodyStart = elseToken.EndByte()
+		}
+	}
+}
+
 // ── Module declarations ───────────────────────────────────────────────────────
 
 func (p *printer) printLoadmodule(n *sitter.Node) {
@@ -275,8 +379,8 @@ func (p *printer) printModparam(n *sitter.Node) {
 	for i := range int(n.ChildCount()) {
 		child := n.Child(i)
 		switch child.Type() {
-		case "modparam", "(", ")":
-			// handled by our manual writes
+		case "modparam", "(", ")", ";":
+			// structural/terminator tokens handled outside the argument list
 		case ",":
 			p.raw(", ")
 		default:
@@ -321,6 +425,7 @@ func (p *printer) printCompoundStatement(n *sitter.Node) {
 	p.depth++
 
 	var prevEnd uint32
+	pendingInline := false // true when an assignment-LHS ERROR was just printed
 	for i := range int(n.ChildCount()) {
 		child := n.Child(i)
 		switch child.Type() {
@@ -329,6 +434,7 @@ func (p *printer) printCompoundStatement(n *sitter.Node) {
 		case "block_end":
 			// skip — closing } is emitted after the loop
 		case "comment", "multiline_comment":
+			pendingInline = false
 			p.emitBlanks(prevEnd, child.StartByte())
 			p.nl()
 			p.raw(p.content(child))
@@ -337,6 +443,26 @@ func (p *printer) printCompoundStatement(n *sitter.Node) {
 			if isBareStmt(child, ";") {
 				// Semicolon is a statement terminator — attach to previous line.
 				p.raw(";")
+				pendingInline = false
+				prevEnd = child.EndByte()
+			} else if child.Type() == "ERROR" && isAssignLHS(p.content(child)) {
+				// Grammar produced an ERROR for the LHS of an assignment (e.g.
+				// when a complex pvar_expression like $(T_req($conid)) is used
+				// as an htable key). The "=" ends up inside the ERROR node and
+				// the RHS becomes a separate sibling. Re-join them here.
+				lhs := extractAssignLHS(p.content(child))
+				p.emitBlanks(prevEnd, child.StartByte())
+				p.nl()
+				p.raw(lhs)
+				p.raw(" = ")
+				pendingInline = true
+				prevEnd = child.EndByte()
+			} else if pendingInline {
+				// RHS of an assignment that was split by a grammar ERROR — print
+				// it on the same line without a preceding newline.
+				pendingInline = false
+				p.emitBlanks(prevEnd, child.StartByte())
+				p.printNode(child)
 				prevEnd = child.EndByte()
 			} else if isPreproc(child.Type()) || isPreprocError(child, p.src) {
 				p.emitBlanks(prevEnd, child.StartByte())
@@ -355,6 +481,28 @@ func (p *printer) printCompoundStatement(n *sitter.Node) {
 	p.depth--
 	p.nl()
 	p.raw("}")
+}
+
+// isAssignLHS reports whether an ERROR node's content ends with a bare "="
+// (assignment operator), meaning the grammar failed to parse the LHS.
+func isAssignLHS(content string) bool {
+	t := strings.TrimRight(content, " \t\n\r")
+	if !strings.HasSuffix(t, "=") {
+		return false
+	}
+	if len(t) < 2 {
+		return false
+	}
+	prev := t[len(t)-2]
+	// Exclude compound operators: ==, !=, <=, >=
+	return prev != '=' && prev != '!' && prev != '<' && prev != '>'
+}
+
+// extractAssignLHS strips the trailing "=" (and surrounding whitespace) from
+// an ERROR node content that represents a failed assignment LHS.
+func extractAssignLHS(content string) string {
+	t := strings.TrimRight(content, " \t\n\r")
+	return strings.TrimRight(t[:len(t)-1], " \t")
 }
 
 // emitBlanks emits blank lines found between src[from:to], preserving the
@@ -662,14 +810,34 @@ func (p *printer) printTopLevelAssignment(n *sitter.Node) {
 func (p *printer) printBinaryExpr(n *sitter.Node) {
 	if !p.measuring && int(n.ChildCount()) >= 3 {
 		single := p.measureNode(n)
-		if p.approxLineLen()+len(single) > p.cfg.PrintWidth {
+		spansLines := srcNewlines(p.src, n.StartByte(), n.EndByte()) > 0
+		if spansLines || p.approxLineLen()+len(single) > p.cfg.PrintWidth {
 			rootOp := p.content(n.Child(1))
-			operands, ops := p.collectBinaryChain(n, rootOp)
-			if len(ops) > 0 {
+			operands, opNodes := p.collectBinaryChain(n, rootOp)
+			if len(opNodes) > 0 {
 				contIndent := p.indentStr() + p.contUnit()
 				p.printNode(operands[0])
-				for i, op := range ops {
-					p.raw("\n" + contIndent + op + " ")
+				for i, opNode := range opNodes {
+					op := p.content(opNode)
+					var newLine bool
+					if spansLines {
+						// Multi-line source: break at operators where the source had a
+						// line break either before the operator or after it (i.e. the
+						// next operand started on a new line). This preserves groupings
+						// like `"a" + X + "b"` on one line while respecting line breaks.
+						newLine = srcNewlines(p.src, operands[i].EndByte(), opNode.StartByte()) > 0 ||
+							srcNewlines(p.src, opNode.EndByte(), operands[i+1].StartByte()) > 0
+					} else {
+						// Single-line source over PrintWidth: greedy packing.
+						// Keep on the current line if it still fits; otherwise wrap.
+						nextSingle := p.measureNode(operands[i+1])
+						newLine = p.approxLineLen()+1+len(op)+1+len(nextSingle) > p.cfg.PrintWidth
+					}
+					if newLine {
+						p.raw("\n" + contIndent + op + " ")
+					} else {
+						p.raw(" " + op + " ")
+					}
 					p.printNode(operands[i+1])
 				}
 				return
@@ -689,17 +857,17 @@ func (p *printer) printBinaryExpr(n *sitter.Node) {
 }
 
 // collectBinaryChain flattens a left-associative chain of the same binary
-// operator into a flat slice of operands and the repeated operator between them.
+// operator into a flat slice of operands and the operator nodes between them.
 //
-//	"a" + "b" + "c"  →  operands=["a","b","c"]  ops=["+","+"]
-func (p *printer) collectBinaryChain(n *sitter.Node, op string) (operands []*sitter.Node, ops []string) {
+// Operator nodes are returned so callers can inspect their source positions.
+func (p *printer) collectBinaryChain(n *sitter.Node, op string) (operands []*sitter.Node, opNodes []*sitter.Node) {
 	for n.Type() == "expression" && n.NamedChildCount() == 1 {
 		n = n.NamedChild(0)
 	}
 	if n.Type() == "binary_expression" && int(n.ChildCount()) >= 3 {
 		if p.content(n.Child(1)) == op {
-			leftOperands, leftOps := p.collectBinaryChain(n.Child(0), op)
-			return append(leftOperands, n.Child(2)), append(leftOps, op)
+			leftOperands, leftOpNodes := p.collectBinaryChain(n.Child(0), op)
+			return append(leftOperands, n.Child(2)), append(leftOpNodes, n.Child(1))
 		}
 	}
 	return []*sitter.Node{n}, nil
@@ -745,17 +913,39 @@ func (p *printer) printRouteCall(n *sitter.Node) {
 }
 
 func (p *printer) printArgumentList(n *sitter.Node) {
-	// argument_list: "(" expr "," expr ")"
-	p.raw("(")
+	// Collect argument nodes (skip punctuation).
+	var args []*sitter.Node
 	for i := range int(n.ChildCount()) {
 		child := n.Child(i)
-		switch child.Type() {
-		case "(", ")":
-		case ",":
-			p.raw(", ")
-		default:
-			p.printNode(child)
+		if child.Type() != "(" && child.Type() != ")" && child.Type() != "," {
+			args = append(args, child)
 		}
+	}
+
+	// If the source argument list spanned multiple lines, preserve the per-line
+	// structure: each argument on its own indented line.
+	if srcNewlines(p.src, n.StartByte(), n.EndByte()) > 0 && len(args) > 1 {
+		p.raw("(")
+		p.depth++
+		for i, arg := range args {
+			p.nl()
+			p.printNode(arg)
+			if i < len(args)-1 {
+				p.raw(",")
+			}
+		}
+		p.depth--
+		p.raw(")")
+		return
+	}
+
+	// Single-line: comma-separated.
+	p.raw("(")
+	for i, arg := range args {
+		if i > 0 {
+			p.raw(", ")
+		}
+		p.printNode(arg)
 	}
 	p.raw(")")
 }
@@ -792,8 +982,8 @@ func (p *printer) measureNode(n *sitter.Node) string {
 	tmp.printNode(n)
 	s := tmp.out.String()
 	// Only keep the first line (in case of multi-line sub-nodes).
-	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
-		return s[:idx]
+	if before, _, ok := strings.Cut(s, "\n"); ok {
+		return before
 	}
 	return s
 }
