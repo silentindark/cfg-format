@@ -991,25 +991,50 @@ func (p *printer) printRouteCall(n *sitter.Node) {
 }
 
 func (p *printer) printArgumentList(n *sitter.Node) {
-	// Collect argument nodes (skip punctuation).
-	var args []*sitter.Node
+	// Build (node, preceded_by_comma) pairs, counting actual "," tokens.
+	// This preserves constructs like "INTERNAL_IP:5060" where the grammar
+	// produces an ERROR node for ":5060" — there is no comma between the
+	// identifier and the error node, so we must not insert one.
+	type item struct {
+		node  *sitter.Node
+		comma bool // was this item preceded by a "," in the source?
+	}
+	var items []item
+	commaCount := 0
+	hadComma := false
 	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Kind() != "(" && child.Kind() != ")" && child.Kind() != "," {
-			args = append(args, child)
+		switch child.Kind() {
+		case "(", ")":
+			// structural — skip
+		case ",":
+			hadComma = true
+			commaCount++
+		default:
+			items = append(items, item{child, hadComma})
+			hadComma = false
 		}
 	}
 
-	// If the source argument list spanned multiple lines, preserve the per-line
-	// structure: each argument on its own indented line.
-	if srcNewlines(p.src, n.StartByte(), n.EndByte()) > 0 && len(args) > 1 {
+	// If the source argument list spanned multiple lines AND has actual comma
+	// separators, preserve the per-line structure: each comma-separated
+	// argument on its own indented line.
+	if srcNewlines(p.src, n.StartByte(), n.EndByte()) > 0 && commaCount > 0 {
 		p.raw("(")
 		p.depth++
-		for i, arg := range args {
-			p.nl()
-			p.printNode(arg)
-			if i < len(args)-1 {
-				p.raw(",")
+		for i, it := range items {
+			if it.comma || i == 0 {
+				// New top-level argument: emit on its own indented line.
+				p.nl()
+				p.printNode(it.node)
+				// Trailing comma if the next item is a real comma-separated arg.
+				if i < len(items)-1 && items[i+1].comma {
+					p.raw(",")
+				}
+			} else {
+				// No preceding comma: this is a concatenated fragment from an
+				// ERROR node (e.g. ":5060" after "INTERNAL_IP") — emit inline.
+				p.printNode(it.node)
 			}
 		}
 		p.depth--
@@ -1017,13 +1042,13 @@ func (p *printer) printArgumentList(n *sitter.Node) {
 		return
 	}
 
-	// Single-line: comma-separated.
+	// Single-line: only add ", " where the source had a comma.
 	p.raw("(")
-	for i, arg := range args {
-		if i > 0 {
+	for _, it := range items {
+		if it.comma {
 			p.raw(", ")
 		}
-		p.printNode(arg)
+		p.printNode(it.node)
 	}
 	p.raw(")")
 }
