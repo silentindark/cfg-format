@@ -6,7 +6,7 @@ import (
 
 	"cfg-format/grammar"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 // Format parses src as a Kamailio cfg file and returns formatted output.
@@ -35,11 +35,15 @@ func ParseForDump(src []byte) (*sitter.Node, error) {
 func parse(src []byte) (*sitter.Node, error) {
 	lang := sitter.NewLanguage(grammar.Language())
 	parser := sitter.NewParser()
-	parser.SetLanguage(lang)
+	defer parser.Close()
 
-	tree, err := parser.ParseCtx(context.Background(), nil, src)
-	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+	if err := parser.SetLanguage(lang); err != nil {
+		return nil, fmt.Errorf("set language: %w", err)
+	}
+
+	tree := parser.ParseCtx(context.Background(), src, nil)
+	if tree == nil {
+		return nil, fmt.Errorf("parse: failed (parser returned nil tree)")
 	}
 	return tree.RootNode(), nil
 }

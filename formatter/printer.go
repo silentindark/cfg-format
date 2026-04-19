@@ -3,7 +3,7 @@ package formatter
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 type printer struct {
@@ -67,12 +67,12 @@ func (p *printer) content(n *sitter.Node) string {
 }
 
 // innerType returns the type of the first named child if n is a top_level_item
-// wrapper, otherwise returns n.Type() directly.
+// wrapper, otherwise returns n.Kind() directly.
 func innerType(n *sitter.Node) string {
-	if n.Type() == "top_level_item" && n.NamedChildCount() > 0 {
-		return n.NamedChild(0).Type()
+	if n.Kind() == "top_level_item" && n.NamedChildCount() > 0 {
+		return n.NamedChild(0).Kind()
 	}
-	return n.Type()
+	return n.Kind()
 }
 
 func (p *printer) print(root *sitter.Node) {
@@ -83,7 +83,7 @@ func (p *printer) print(root *sitter.Node) {
 }
 
 func (p *printer) printNode(n *sitter.Node) {
-	switch n.Type() {
+	switch n.Kind() {
 	case "source_file":
 		p.printSourceFile(n)
 	case "routing_block":
@@ -163,7 +163,7 @@ func (p *printer) printFallback(n *sitter.Node) {
 		p.raw(p.content(n))
 		return
 	}
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		p.printNode(n.Child(i))
 	}
 }
@@ -180,14 +180,14 @@ func (p *printer) printSourceFile(n *sitter.Node) {
 	// consecutive comment chain that immediately precedes a routing_block.
 	// Only this first comment gets the 2-blank-line gap; subsequent comments
 	// in the same chain are kept together with a single newline.
-	isDocChainStart := func(i int, prev string) bool {
+	isDocChainStart := func(i uint, prev string) bool {
 		if !isComment(innerType(n.Child(i))) {
 			return false
 		}
 		if isComment(prev) {
 			return false // not the first in the chain
 		}
-		for j := i + 1; j < int(n.ChildCount()); j++ {
+		for j := i + 1; j < n.ChildCount(); j++ {
 			t := innerType(n.Child(j))
 			if isRoute(t) {
 				return true
@@ -200,8 +200,8 @@ func (p *printer) printSourceFile(n *sitter.Node) {
 	}
 
 	prevInner := ""
-	var prevEnd uint32
-	for i := range int(n.ChildCount()) {
+	var prevEnd uint
+	for i := range n.ChildCount() {
 		child := n.Child(i)
 		curInner := innerType(child)
 
@@ -246,7 +246,7 @@ func (p *printer) printSourceFile(n *sitter.Node) {
 }
 
 // srcNewlines counts the number of newline characters in src[from:to].
-func srcNewlines(src []byte, from, to uint32) int {
+func srcNewlines(src []byte, from, to uint) int {
 	n := 0
 	for _, b := range src[from:to] {
 		if b == '\n' {
@@ -271,10 +271,10 @@ func (p *printer) printPreprocIfdef(n *sitter.Node) {
 		return
 	}
 
-	var prevEnd uint32
-	for i := range int(n.ChildCount()) {
+	var prevEnd uint
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "#!ifdef", "#!ifndef":
 			p.raw(p.content(child))
 			prevEnd = child.EndByte()
@@ -289,12 +289,12 @@ func (p *printer) printPreprocIfdef(n *sitter.Node) {
 			// The #!else keyword must be at column 0; body is reformatted.
 			p.raw("\n")
 			p.raw(p.content(child.Child(0))) // "#!else"
-			var elseEnd uint32 = child.Child(0).EndByte()
-			for j := 1; j < int(child.ChildCount()); j++ {
+			elseEnd := child.Child(0).EndByte()
+			for j := uint(1); j < child.ChildCount(); j++ {
 				body := child.Child(j)
 				if isBareStmt(body, ";") {
 					p.raw(";")
-				} else if isPreproc(body.Type()) || isPreprocError(body, p.src) {
+				} else if isPreproc(body.Kind()) || isPreprocError(body, p.src) {
 					// Nested preproc directives must always start at column 0.
 					p.emitBlanks(elseEnd, body.StartByte())
 					p.raw("\n")
@@ -310,7 +310,7 @@ func (p *printer) printPreprocIfdef(n *sitter.Node) {
 		default:
 			if isBareStmt(child, ";") {
 				p.raw(";")
-			} else if isPreproc(child.Type()) || isPreprocError(child, p.src) {
+			} else if isPreproc(child.Kind()) || isPreprocError(child, p.src) {
 				// Nested preproc directives must always start at column 0.
 				p.emitBlanks(prevEnd, child.StartByte())
 				p.raw("\n")
@@ -329,14 +329,14 @@ func (p *printer) printPreprocIfdef(n *sitter.Node) {
 // preproc_else child) contains an ERROR node as a direct child, which means
 // the #!ifdef block crosses structural boundaries like "} else {".
 func preprocHasErrorChild(n *sitter.Node) bool {
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() == "ERROR" {
+		if child.Kind() == "ERROR" {
 			return true
 		}
-		if child.Type() == "preproc_else" {
-			for j := range int(child.ChildCount()) {
-				if child.Child(j).Type() == "ERROR" {
+		if child.Kind() == "preproc_else" {
+			for j := range child.ChildCount() {
+				if child.Child(j).Kind() == "ERROR" {
 					return true
 				}
 			}
@@ -352,8 +352,8 @@ func preprocHasErrorChild(n *sitter.Node) bool {
 // the ifdef body to satisfy the grammar. A routing_block inside a
 // compound_statement is never semantically valid, so verbatim output is needed.
 func preprocHasNestedRoute(n *sitter.Node) bool {
-	for i := range int(n.ChildCount()) {
-		if n.Child(i).Type() == "routing_block" {
+	for i := range n.ChildCount() {
+		if n.Child(i).Kind() == "routing_block" {
 			return true
 		}
 	}
@@ -364,10 +364,10 @@ func preprocHasNestedRoute(n *sitter.Node) bool {
 // boundaries. Directive lines (#!ifdef, #!else, #!endif) are forced to column
 // 0; the body between them is reproduced from the original source bytes.
 func (p *printer) printPreprocIfdefVerbatim(n *sitter.Node) {
-	var bodyStart uint32
-	for i := range int(n.ChildCount()) {
+	var bodyStart uint
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "#!ifdef", "#!ifndef":
 			p.raw(p.content(child))
 		case "identifier":
@@ -399,9 +399,9 @@ func (p *printer) printPreprocIfdefVerbatim(n *sitter.Node) {
 func (p *printer) printLoadmodule(n *sitter.Node) {
 	// loadmodule "filename.so"
 	p.raw("loadmodule")
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() == "loadmodule" {
+		if child.Kind() == "loadmodule" {
 			continue
 		}
 		p.raw(" ")
@@ -412,10 +412,10 @@ func (p *printer) printLoadmodule(n *sitter.Node) {
 func (p *printer) printModparam(n *sitter.Node) {
 	// modparam("module", "key", "value")
 	p.raw("modparam(")
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
-		case "modparam", "(", ")", ";":
+		switch child.Kind() {
+		case "modparam", "(", ")", ";", "eos":
 			// structural/terminator tokens handled outside the argument list
 		case ",":
 			p.raw(", ")
@@ -430,7 +430,7 @@ func (p *printer) printModparam(n *sitter.Node) {
 
 func (p *printer) printPreprocDef(n *sitter.Node) {
 	// #!define IDENTIFIER [value] — insert spaces between tokens
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		if i > 0 {
 			p.raw(" ")
 		}
@@ -441,9 +441,9 @@ func (p *printer) printPreprocDef(n *sitter.Node) {
 // ── Route blocks ─────────────────────────────────────────────────────────────
 
 func (p *printer) printRoutingBlock(n *sitter.Node) {
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() == "compound_statement" {
+		if child.Kind() == "compound_statement" {
 			if p.lastChar != ' ' {
 				p.raw(" ")
 			}
@@ -460,11 +460,11 @@ func (p *printer) printCompoundStatement(n *sitter.Node) {
 	p.raw("{")
 	p.depth++
 
-	var prevEnd uint32
+	var prevEnd uint
 	pendingInline := false // true when an assignment-LHS ERROR was just printed
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "block_start":
 			prevEnd = child.EndByte()
 		case "block_end":
@@ -481,7 +481,7 @@ func (p *printer) printCompoundStatement(n *sitter.Node) {
 				p.raw(";")
 				pendingInline = false
 				prevEnd = child.EndByte()
-			} else if child.Type() == "ERROR" && isAssignLHS(p.content(child)) {
+			} else if child.Kind() == "ERROR" && isAssignLHS(p.content(child)) {
 				// Grammar produced an ERROR for the LHS of an assignment (e.g.
 				// when a complex pvar_expression like $(T_req($conid)) is used
 				// as an htable key). The "=" ends up inside the ERROR node and
@@ -500,7 +500,7 @@ func (p *printer) printCompoundStatement(n *sitter.Node) {
 				p.emitBlanks(prevEnd, child.StartByte())
 				p.printNode(child)
 				prevEnd = child.EndByte()
-			} else if isPreproc(child.Type()) || isPreprocError(child, p.src) {
+			} else if isPreproc(child.Kind()) || isPreprocError(child, p.src) {
 				p.emitBlanks(prevEnd, child.StartByte())
 				p.raw("\n")
 				p.printNode(child)
@@ -544,7 +544,7 @@ func extractAssignLHS(content string) string {
 // emitBlanks emits blank lines found between src[from:to], preserving the
 // blank lines that existed in the source. Only the whitespace-only content of
 // those lines is stripped (handled later by result()).
-func (p *printer) emitBlanks(from, to uint32) {
+func (p *printer) emitBlanks(from, to uint) {
 	for range srcBlanks(p.src, from, to) {
 		p.raw("\n")
 	}
@@ -553,7 +553,7 @@ func (p *printer) emitBlanks(from, to uint32) {
 // srcBlanks counts blank lines in src[from:to].
 // The first newline is the EOL of the previous item; each additional one is a
 // blank line.
-func srcBlanks(src []byte, from, to uint32) int {
+func srcBlanks(src []byte, from, to uint) int {
 	if from >= to {
 		return 0
 	}
@@ -569,12 +569,22 @@ func srcBlanks(src []byte, from, to uint32) int {
 	return n
 }
 
+// isEosNode returns true when n is a statement-terminator token.
+// Older grammar versions used an anonymous ";" token; newer versions use a
+// named "eos" rule that carries the same ";" content.
+func isEosNode(n *sitter.Node) bool {
+	k := n.Kind()
+	return k == ";" || k == "eos"
+}
+
 // isBareStmt returns true when n is a statement node whose only child is an
-// anonymous token of type tok (e.g. just a lone ";").
+// end-of-statement token (";") or a lone tok.
 func isBareStmt(n *sitter.Node, tok string) bool {
-	return n.Type() == "statement" &&
-		n.ChildCount() == 1 &&
-		n.Child(0).Type() == tok
+	if n.Kind() != "statement" || n.ChildCount() != 1 {
+		return false
+	}
+	child := n.Child(0)
+	return child.Kind() == tok || isEosNode(child)
 }
 
 // isPreproc returns true for node types that are preprocessor directives.
@@ -592,7 +602,7 @@ func isPreproc(nodeType string) bool {
 // isPreprocError returns true when an ERROR node contains a #! directive.
 // The grammar emits ERROR for unmatched #!endif / #!else at certain positions.
 func isPreprocError(n *sitter.Node, src []byte) bool {
-	if n.Type() != "ERROR" {
+	if n.Kind() != "ERROR" {
 		return false
 	}
 	return strings.HasPrefix(strings.TrimSpace(string(src[n.StartByte():n.EndByte()])), "#!")
@@ -602,9 +612,9 @@ func isPreprocError(n *sitter.Node, src []byte) bool {
 
 func (p *printer) printIfStatement(n *sitter.Node) {
 	p.raw("if")
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "if":
 			// already written
 		case "parenthesized_expression":
@@ -628,7 +638,7 @@ func (p *printer) printIfStatement(n *sitter.Node) {
 // printIfBody handles the body of an if/else: if it wraps a compound_statement
 // print the block; otherwise print the statement on the same line.
 func (p *printer) printIfBody(stmt *sitter.Node) {
-	if stmt.NamedChildCount() == 1 && stmt.NamedChild(0).Type() == "compound_statement" {
+	if stmt.NamedChildCount() == 1 && stmt.NamedChild(0).Kind() == "compound_statement" {
 		p.printCompoundStatement(stmt.NamedChild(0))
 		return
 	}
@@ -637,9 +647,9 @@ func (p *printer) printIfBody(stmt *sitter.Node) {
 
 func (p *printer) printElseBlock(n *sitter.Node) {
 	p.raw("else")
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "else":
 		case "if_statement":
 			p.raw(" ")
@@ -658,9 +668,9 @@ func (p *printer) printElseBlock(n *sitter.Node) {
 
 func (p *printer) printWhileStatement(n *sitter.Node) {
 	p.raw("while")
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "while":
 		case "parenthesized_expression":
 			p.raw(" ")
@@ -679,9 +689,9 @@ func (p *printer) printWhileStatement(n *sitter.Node) {
 
 func (p *printer) printSwitchStatement(n *sitter.Node) {
 	p.raw("switch")
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "switch":
 		case "parenthesized_expression":
 			p.raw(" ")
@@ -706,11 +716,11 @@ func (p *printer) printSwitchBody(n *sitter.Node) {
 	p.depth++ // inside the block
 
 	inCaseBody := false
-	var prevEnd uint32
+	var prevEnd uint
 
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "block_start":
 			prevEnd = child.EndByte()
 		case "block_end":
@@ -732,7 +742,7 @@ func (p *printer) printSwitchBody(n *sitter.Node) {
 				inCaseBody = true
 			} else if isBareStmt(child, ";") {
 				p.raw(";")
-			} else if isPreproc(child.Type()) || isPreprocError(child, p.src) {
+			} else if isPreproc(child.Kind()) || isPreprocError(child, p.src) {
 				p.emitBlanks(prevEnd, child.StartByte())
 				p.raw("\n")
 				p.printNode(child)
@@ -756,17 +766,17 @@ func (p *printer) printSwitchBody(n *sitter.Node) {
 // isCaseLabel returns true when n is a statement node whose sole named child
 // is a case_statement (i.e. a case/default label in a switch body).
 func isCaseLabel(n *sitter.Node) bool {
-	return n.Type() == "statement" &&
+	return n.Kind() == "statement" &&
 		n.NamedChildCount() == 1 &&
-		n.NamedChild(0).Type() == "case_statement"
+		n.NamedChild(0).Kind() == "case_statement"
 }
 
 func (p *printer) printCaseStatement(n *sitter.Node) {
 	passedColon := false
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
 		switch {
-		case child.Type() == ":":
+		case child.Kind() == ":":
 			p.raw(":")
 			passedColon = true
 			p.depth++
@@ -775,7 +785,7 @@ func (p *printer) printCaseStatement(n *sitter.Node) {
 				p.raw(" ")
 			}
 			p.raw(p.content(child))
-		case child.Type() == ";":
+		case isEosNode(child):
 			// Semicolon terminates the inline statement — no newline.
 			p.raw(";")
 		default:
@@ -791,9 +801,9 @@ func (p *printer) printCaseStatement(n *sitter.Node) {
 // ── Statements ───────────────────────────────────────────────────────────────
 
 func (p *printer) printStatement(n *sitter.Node) {
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() == ";" {
+		if isEosNode(child) {
 			p.raw(";")
 		} else {
 			p.printNode(child)
@@ -807,13 +817,13 @@ func (p *printer) printReturnStatement(n *sitter.Node) {
 	//   (core_function "exit"|"drop") ";"  — exit/drop statements
 	// The keyword part (return or core_function) must not get a leading space.
 	// Only the optional value expression gets a space before it.
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		switch child.Type() {
+		switch child.Kind() {
 		case "return", "core_function":
 			// keyword — emit raw content, no leading space
 			p.raw(p.content(child))
-		case ";":
+		case ";", "eos":
 			p.raw(";")
 		default:
 			// value expression — needs a space separator
@@ -841,9 +851,9 @@ func (p *printer) printAssignmentExpr(n *sitter.Node) {
 		return
 	}
 	// Fallback: pad the "=" token.
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() == "=" {
+		if child.Kind() == "=" {
 			p.raw(" = ")
 		} else {
 			p.printNode(child)
@@ -861,9 +871,9 @@ func (p *printer) printTopLevelAssignment(n *sitter.Node) {
 		p.raw(p.content(value))
 		return
 	}
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() == "=" {
+		if child.Kind() == "=" {
 			p.raw("=")
 		} else {
 			p.raw(p.content(child))
@@ -913,7 +923,7 @@ func (p *printer) printBinaryExpr(n *sitter.Node) {
 		}
 	}
 	// Inline: spaces around the operator token in the middle position.
-	count := int(n.ChildCount())
+	count := n.ChildCount()
 	for i := range count {
 		child := n.Child(i)
 		if !child.IsNamed() && i > 0 && i < count-1 {
@@ -929,10 +939,10 @@ func (p *printer) printBinaryExpr(n *sitter.Node) {
 //
 // Operator nodes are returned so callers can inspect their source positions.
 func (p *printer) collectBinaryChain(n *sitter.Node, op string) (operands []*sitter.Node, opNodes []*sitter.Node) {
-	for n.Type() == "expression" && n.NamedChildCount() == 1 {
+	for n.Kind() == "expression" && n.NamedChildCount() == 1 {
 		n = n.NamedChild(0)
 	}
-	if n.Type() == "binary_expression" && int(n.ChildCount()) >= 3 {
+	if n.Kind() == "binary_expression" && int(n.ChildCount()) >= 3 {
 		if p.content(n.Child(1)) == op {
 			leftOperands, leftOpNodes := p.collectBinaryChain(n.Child(0), op)
 			return append(leftOperands, n.Child(2)), append(leftOpNodes, n.Child(1))
@@ -943,16 +953,16 @@ func (p *printer) collectBinaryChain(n *sitter.Node, op string) (operands []*sit
 
 func (p *printer) printUnaryExpr(n *sitter.Node) {
 	// Operator immediately followed by operand: !expr, -expr — no space.
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		p.printNode(n.Child(i))
 	}
 }
 
 func (p *printer) printParenExpr(n *sitter.Node) {
 	p.raw("(")
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() == "(" || child.Type() == ")" {
+		if child.Kind() == "(" || child.Kind() == ")" {
 			continue
 		}
 		p.printNode(child)
@@ -963,16 +973,16 @@ func (p *printer) printParenExpr(n *sitter.Node) {
 func (p *printer) printCallExpr(n *sitter.Node) {
 	// call_expression: expression(func_name) argument_list(args)
 	// Delegate comma handling to printArgumentList.
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		p.printNode(n.Child(i))
 	}
 }
 
 func (p *printer) printRouteCall(n *sitter.Node) {
 	// route(NAME) or route(NUMBER) — treat like a call with no argument_list wrapper
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() == "," {
+		if child.Kind() == "," {
 			p.raw(", ")
 		} else {
 			p.printNode(child)
@@ -983,9 +993,9 @@ func (p *printer) printRouteCall(n *sitter.Node) {
 func (p *printer) printArgumentList(n *sitter.Node) {
 	// Collect argument nodes (skip punctuation).
 	var args []*sitter.Node
-	for i := range int(n.ChildCount()) {
+	for i := range n.ChildCount() {
 		child := n.Child(i)
-		if child.Type() != "(" && child.Type() != ")" && child.Type() != "," {
+		if child.Kind() != "(" && child.Kind() != ")" && child.Kind() != "," {
 			args = append(args, child)
 		}
 	}
@@ -1102,9 +1112,9 @@ func (p *printer) printParenOrWrap(paren *sitter.Node, _ string) {
 
 	// Condition is too long — find the inner expression.
 	var inner *sitter.Node
-	for i := range int(paren.ChildCount()) {
+	for i := range paren.ChildCount() {
 		ch := paren.Child(i)
-		if ch.Type() != "(" && ch.Type() != ")" {
+		if ch.Kind() != "(" && ch.Kind() != ")" {
 			inner = ch
 			break
 		}
@@ -1139,10 +1149,10 @@ func (p *printer) printParenOrWrap(paren *sitter.Node, _ string) {
 //	a && b && c  →  operands=[a,b,c]  ops=["&&","&&"]
 func (p *printer) collectAndOrParts(n *sitter.Node) (operands []*sitter.Node, ops []string) {
 	// Unwrap expression wrapper nodes.
-	for n.Type() == "expression" && n.NamedChildCount() == 1 {
+	for n.Kind() == "expression" && n.NamedChildCount() == 1 {
 		n = n.NamedChild(0)
 	}
-	if n.Type() == "binary_expression" && int(n.ChildCount()) >= 3 {
+	if n.Kind() == "binary_expression" && int(n.ChildCount()) >= 3 {
 		opStr := p.content(n.Child(1))
 		if opStr == "&&" || opStr == "||" {
 			leftOps, leftOperators := p.collectAndOrParts(n.Child(0))

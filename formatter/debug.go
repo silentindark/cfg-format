@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 // DumpTree prints the full CST rooted at node to stdout.
@@ -20,13 +20,13 @@ func dumpNode(src []byte, n *sitter.Node, depth int) {
 		named = "*"
 	}
 	if n.ChildCount() == 0 {
-		fmt.Printf("%s[%s%s] %q\n", indent, n.Type(), named, src[n.StartByte():n.EndByte()])
+		fmt.Printf("%s[%s%s] %q\n", indent, n.Kind(), named, src[n.StartByte():n.EndByte()])
 	} else {
 		fieldName := ""
 		// tree-sitter Go binding doesn't expose field names per-child easily,
 		// so we note named status only.
-		fmt.Printf("%s(%s%s%s\n", indent, n.Type(), named, fieldName)
-		for i := range int(n.ChildCount()) {
+		fmt.Printf("%s(%s%s%s\n", indent, n.Kind(), named, fieldName)
+		for i := range n.ChildCount() {
 			dumpNode(src, n.Child(i), depth+1)
 		}
 		fmt.Printf("%s)\n", indent)
