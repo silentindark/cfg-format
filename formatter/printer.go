@@ -20,13 +20,13 @@ func newPrinter(src []byte, cfg *Config) *printer {
 }
 
 // result returns the formatted output: trailing whitespace stripped per line,
-// single trailing newline guaranteed.
+// exactly one blank line at end of file.
 func (p *printer) result() []byte {
 	lines := strings.Split(p.out.String(), "\n")
 	for i, l := range lines {
 		lines[i] = strings.TrimRight(l, " \t")
 	}
-	return []byte(strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n")
+	return []byte(strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n\n")
 }
 
 // raw appends s verbatim and tracks the last written byte.
@@ -102,6 +102,8 @@ func (p *printer) printNode(n *sitter.Node) {
 		p.printCaseStatement(n)
 	case "statement":
 		p.printStatement(n)
+	case "return_statement":
+		p.printReturnStatement(n)
 	case "assignment_expression":
 		p.printAssignmentExpr(n)
 	case "top_level_assignment_expression":
@@ -288,6 +290,11 @@ func (p *printer) printPreprocIfdef(n *sitter.Node) {
 				body := child.Child(j)
 				if isBareStmt(body, ";") {
 					p.raw(";")
+				} else if isPreproc(body.Type()) || isPreprocError(body, p.src) {
+					// Nested preproc directives must always start at column 0.
+					p.emitBlanks(elseEnd, body.StartByte())
+					p.raw("\n")
+					p.printNode(body)
 				} else {
 					p.emitBlanks(elseEnd, body.StartByte())
 					p.nl()
@@ -299,6 +306,11 @@ func (p *printer) printPreprocIfdef(n *sitter.Node) {
 		default:
 			if isBareStmt(child, ";") {
 				p.raw(";")
+			} else if isPreproc(child.Type()) || isPreprocError(child, p.src) {
+				// Nested preproc directives must always start at column 0.
+				p.emitBlanks(prevEnd, child.StartByte())
+				p.raw("\n")
+				p.printNode(child)
 			} else {
 				p.emitBlanks(prevEnd, child.StartByte())
 				p.nl()
@@ -765,9 +777,33 @@ func (p *printer) printStatement(n *sitter.Node) {
 	}
 }
 
+func (p *printer) printReturnStatement(n *sitter.Node) {
+	// return_statement: "return" [expression] ";"
+	// Must emit a space between "return" and the optional value so that
+	// "return -1" doesn't become "return-1".
+	for i := range int(n.ChildCount()) {
+		child := n.Child(i)
+		switch child.Type() {
+		case "return":
+			p.raw("return")
+		case ";":
+			p.raw(";")
+		default:
+			p.raw(" ")
+			p.printNode(child)
+		}
+	}
+}
+
 // ── Expressions ──────────────────────────────────────────────────────────────
 
 func (p *printer) printAssignmentExpr(n *sitter.Node) {
+	// At global scope (depth 0), assignment_expression nodes that appear inside
+	// preproc_ifdef bodies are config-style key=value — no spaces around "=".
+	if p.depth == 0 {
+		p.printTopLevelAssignment(n)
+		return
+	}
 	left := n.ChildByFieldName("left")
 	right := n.ChildByFieldName("right")
 	if left != nil && right != nil {
@@ -815,7 +851,11 @@ func (p *printer) printBinaryExpr(n *sitter.Node) {
 			rootOp := p.content(n.Child(1))
 			operands, opNodes := p.collectBinaryChain(n, rootOp)
 			if len(opNodes) > 0 {
-				contIndent := p.indentStr() + p.contUnit()
+				// Use the actual leading whitespace of the current line so that
+				// nested wrapping (e.g. || inside an && continuation) indents
+				// one level beyond wherever this expression's line started,
+				// rather than just one level beyond p.depth.
+				contIndent := p.currentLineIndent() + p.contUnit()
 				p.printNode(operands[0])
 				for i, opNode := range opNodes {
 					op := p.content(opNode)
@@ -1003,6 +1043,21 @@ func (p *printer) approxLineLen() int {
 		}
 	}
 	return col
+}
+
+// currentLineIndent returns the leading whitespace of the most recently started
+// line in the output buffer. Used to derive continuation indent relative to the
+// actual current line, so that nested wrapping (e.g. || inside && continuation)
+// indents one extra level beyond wherever that line started, not just p.depth.
+func (p *printer) currentLineIndent() string {
+	s := p.out.String()
+	start := strings.LastIndexByte(s, '\n') + 1
+	line := s[start:]
+	i := 0
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	return line[:i]
 }
 
 // printParenOrWrap prints a parenthesized_expression.  If the resulting line
