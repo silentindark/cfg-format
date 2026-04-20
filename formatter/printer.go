@@ -190,7 +190,7 @@ func (p *printer) printErrorRoot(n *sitter.Node) {
 
 		if i > 0 {
 			newlines := srcNewlines(p.src, prevEnd, child.StartByte())
-			if prevEnd > 0 && p.src[prevEnd-1] == '\n' {
+			if prevEnd > 0 && p.src[prevEnd-1] == '\n' && p.lastChar != '\n' {
 				newlines++
 			}
 			switch {
@@ -350,7 +350,9 @@ func (p *printer) printSourceFile(n *sitter.Node) {
 			// top_level_item nodes include the trailing '\n' in their EndByte,
 			// so the gap [prevEnd, child.StartByte()] has 0 newlines for
 			// consecutive lines. Count the trailing '\n' explicitly.
-			if prevEnd > 0 && p.src[prevEnd-1] == '\n' {
+			// But only when the previous node did NOT already emit that '\n'
+			// as part of its content (e.g. a comment whose text is "#\n").
+			if prevEnd > 0 && p.src[prevEnd-1] == '\n' && p.lastChar != '\n' {
 				newlines++
 			}
 			switch {
@@ -1273,10 +1275,26 @@ func (p *printer) printArgumentList(n *sitter.Node) {
 		}
 	}
 
-	// If the source argument list spanned multiple lines AND has actual comma
-	// separators, preserve the per-line structure: each comma-separated
-	// argument on its own indented line.
-	if srcNewlines(p.src, n.StartByte(), n.EndByte()) > 0 && commaCount > 0 {
+	// If arguments were originally placed on separate lines (there is a newline
+	// between a comma and the next argument), preserve the per-argument layout.
+	// We intentionally do NOT trigger this when a single argument spans lines
+	// internally (e.g. a string concatenation that wraps), because re-indenting
+	// that would produce a different structure on every formatter pass.
+	argsOnSeparateLines := false
+	if commaCount > 0 {
+		for i := 1; i < len(items); i++ {
+			if items[i].comma {
+				// There is a comma before items[i]; check for a newline in the
+				// source gap between the previous item's end and this one's start.
+				prevItem := items[i-1].node
+				if srcNewlines(p.src, prevItem.EndByte(), items[i].node.StartByte()) > 0 {
+					argsOnSeparateLines = true
+					break
+				}
+			}
+		}
+	}
+	if argsOnSeparateLines {
 		p.raw("(")
 		p.depth++
 		for i, it := range items {
