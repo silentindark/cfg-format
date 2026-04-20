@@ -1,7 +1,13 @@
 BINARY    := cfg-format
 BUILD_DIR := build
-MODULE    := cfg-format
+GOBIN     := $(shell go env GOBIN)
+ifeq ($(GOBIN),)
 GOBIN     := $(shell go env GOPATH)/bin
+endif
+
+# Embed the nearest git tag, or fall back to the short commit hash.
+VERSION   := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS   := -ldflags "-X main.version=$(VERSION)"
 
 .DEFAULT_GOAL := help
 
@@ -22,10 +28,11 @@ help:
 
 build:
 	mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BINARY) .
+	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) .
 
-install:
-	go install .
+install: build
+	cp $(BUILD_DIR)/$(BINARY) $(GOBIN)/$(BINARY)
+	@echo "Installed $(BINARY) to $(GOBIN)"
 
 uninstall:
 	rm -f $(GOBIN)/$(BINARY)

@@ -7,12 +7,13 @@ import (
 )
 
 type printer struct {
-	src       []byte
-	cfg       *Config
-	out       strings.Builder
-	depth     int
-	lastChar  byte
-	measuring bool // true inside measureNode; suppresses wrap decisions to avoid recursion
+	src          []byte
+	cfg          *Config
+	out          strings.Builder
+	depth        int
+	lastChar     byte
+	measuring    bool        // true inside measureNode; suppresses wrap decisions to avoid recursion
+	defineAligns map[uint]int // StartByte of preproc_def node → column at which value starts
 }
 
 func newPrinter(src []byte, cfg *Config) *printer {
@@ -76,9 +77,145 @@ func innerType(n *sitter.Node) string {
 }
 
 func (p *printer) print(root *sitter.Node) {
+	// Tree-sitter occasionally returns an ERROR node as the parse root (instead
+	// of source_file) when its error-recovery algorithm can't fit the content
+	// into the grammar's start rule — even though most children are valid
+	// top_level_items or routing_blocks.  Format the well-structured children
+	// normally and emit any loose-token fragments verbatim.
+	if root.Kind() == "ERROR" && root.ChildCount() > 0 {
+		p.printErrorRoot(root)
+		if p.lastChar != '\n' {
+			p.raw("\n")
+		}
+		return
+	}
 	p.printNode(root)
 	if p.lastChar != '\n' {
 		p.raw("\n")
+	}
+}
+
+// isTopLevelKind returns true for node kinds that are valid as direct children
+// of source_file (or an ERROR root acting as source_file).
+func isTopLevelKind(kind string) bool {
+	switch kind {
+	case "top_level_item", "routing_block", "multiline_comment", "comment",
+		"preproc_ifdef", "preproc_ifndef", "preproc_def", "preproc_trydef",
+		"preproc_substdefs", "preproc_else", "preproc_endif",
+		"preproc_include", "preproc_undef",
+		"include_file", "import_file", "file_starter",
+		"loadmodule", "modparam", "ERROR":
+		return true
+	}
+	return false
+}
+
+// printErrorRoot handles the unusual case where tree-sitter returns an ERROR
+// node as the parse root.  Well-structured children (top_level_item,
+// routing_block, etc.) are formatted normally via printSourceFile logic.
+// Runs of loose tokens — fragments of route blocks that the parser couldn't
+// fit into a routing_block node — are detected and emitted verbatim so that
+// no content is corrupted.
+func (p *printer) printErrorRoot(n *sitter.Node) {
+	p.defineAligns = computeDefineAlignments(p.src, n)
+
+	isComment := func(t string) bool { return t == "comment" || t == "multiline_comment" }
+	isRoute := func(t string) bool { return t == "routing_block" }
+
+	isDocChainStart := func(i uint, prev string) bool {
+		if !isComment(innerType(n.Child(i))) {
+			return false
+		}
+		if isComment(prev) {
+			return false
+		}
+		for j := i + 1; j < n.ChildCount(); j++ {
+			t := innerType(n.Child(j))
+			if isRoute(t) {
+				return true
+			}
+			if !isComment(t) {
+				return false
+			}
+		}
+		return false
+	}
+
+	prevInner := ""
+	var prevEnd uint
+	count := n.ChildCount()
+
+	for i := uint(0); i < count; i++ {
+		child := n.Child(i)
+		curKind := child.Kind()
+
+		if !isTopLevelKind(curKind) {
+			// Start of a loose-token run: a route block the parser couldn't
+			// structure as a routing_block.  Collect forward until we hit the
+			// lone "}" that closes the block (its trimmed content is exactly
+			// "}"), or until we bump into the next well-formed routing_block.
+			start := child.StartByte()
+			endIdx := i
+			for j := i; j < count; j++ {
+				jc := n.Child(j)
+				endIdx = j
+				// A child whose sole content is "}" closes the broken block.
+				if j > i && strings.TrimSpace(string(p.src[jc.StartByte():jc.EndByte()])) == "}" {
+					break
+				}
+				// Safety stop: a properly-parsed routing_block begins the next section.
+				if jc.Kind() == "routing_block" && j > i {
+					endIdx = j - 1
+					break
+				}
+			}
+			end := n.Child(endIdx).EndByte()
+			i = endIdx // outer loop will advance to endIdx+1
+
+			// Emit with 2 blank lines before (matches route-block spacing).
+			if prevEnd > 0 {
+				p.blankLine()
+				p.blankLine()
+			}
+			block := strings.TrimRight(string(p.src[start:end]), "\n")
+			p.raw(block)
+			// After a verbatim route block, pretend prevInner is routing_block
+			// so that immediately-following doc comments are spaced correctly.
+			prevInner = "routing_block"
+			prevEnd = end
+			continue
+		}
+
+		curInner := innerType(child)
+
+		if i > 0 {
+			newlines := srcNewlines(p.src, prevEnd, child.StartByte())
+			if prevEnd > 0 && p.src[prevEnd-1] == '\n' {
+				newlines++
+			}
+			switch {
+			case newlines == 0:
+				p.raw(" ")
+			case isRoute(curInner) && isComment(prevInner):
+				p.raw("\n")
+			case isRoute(curInner), isRoute(prevInner):
+				p.blankLine()
+				p.blankLine()
+			case isDocChainStart(i, prevInner):
+				p.blankLine()
+				p.blankLine()
+			default:
+				blanks := newlines - 1
+				for range blanks {
+					p.raw("\n")
+				}
+				p.raw("\n")
+			}
+		}
+
+		p.printNode(child)
+		prevInner = curInner
+		prevEnd = child.EndByte()
 	}
 }
 
@@ -171,6 +308,9 @@ func (p *printer) printFallback(n *sitter.Node) {
 // ── Top-level ────────────────────────────────────────────────────────────────
 
 func (p *printer) printSourceFile(n *sitter.Node) {
+	// Pre-compute column alignment for consecutive define groups.
+	p.defineAligns = computeDefineAlignments(p.src, n)
+
 	isComment := func(t string) bool {
 		return t == "comment" || t == "multiline_comment"
 	}
@@ -429,13 +569,54 @@ func (p *printer) printModparam(n *sitter.Node) {
 // ── Preprocessor ─────────────────────────────────────────────────────────────
 
 func (p *printer) printPreprocDef(n *sitter.Node) {
-	// #!define IDENTIFIER [value] — insert spaces between tokens
-	for i := range n.ChildCount() {
-		if i > 0 {
-			p.raw(" ")
-		}
-		p.raw(p.content(n.Child(i)))
+	// If this define belongs to a consecutive group, align its value.
+	if alignCol, ok := p.defineAligns[n.StartByte()]; ok {
+		p.printPreprocDefAligned(n, alignCol)
+		return
 	}
+	// Otherwise preserve the original inter-token whitespace verbatim so that
+	// manually aligned defines (already formatted) are not disturbed.
+	// Tabs in the gap are replaced with spaces so the output never contains
+	// tab-aligned padding regardless of what the source used.
+	for i := range n.ChildCount() {
+		child := n.Child(i)
+		if i > 0 {
+			prev := n.Child(i - 1)
+			gap := strings.ReplaceAll(string(p.src[prev.EndByte():child.StartByte()]), "\t", " ")
+			p.raw(gap)
+		}
+		p.raw(p.content(child))
+	}
+}
+
+// printPreprocDefAligned prints a preproc_def/preproc_trydef with its value
+// padded to alignCol (column at which all values in the group start).
+func (p *printer) printPreprocDefAligned(n *sitter.Node, alignCol int) {
+	if n.ChildCount() < 3 {
+		// No value — just emit keyword + space + identifier.
+		p.raw(p.content(n.Child(0)))
+		if n.ChildCount() >= 2 {
+			p.raw(" ")
+			p.raw(p.content(n.Child(1)))
+		}
+		return
+	}
+	keyword := n.Child(0) // "#!define" / "#!trydef"
+	ident := n.Child(1)   // identifier
+	value := n.Child(2)   // preproc_arg
+
+	p.raw(p.content(keyword))
+	p.raw(" ")
+	p.raw(p.content(ident))
+
+	// Pad from end-of-identifier to alignCol.
+	prefixLen := len(p.content(keyword)) + 1 + len(p.content(ident))
+	padding := alignCol - prefixLen
+	if padding < 1 {
+		padding = 1
+	}
+	p.raw(strings.Repeat(" ", padding))
+	p.raw(p.content(value))
 }
 
 // ── Route blocks ─────────────────────────────────────────────────────────────
@@ -567,6 +748,82 @@ func srcBlanks(src []byte, from, to uint) int {
 		n--
 	}
 	return n
+}
+
+// computeDefineAlignments scans the direct children of a source_file node and
+// returns a map from the StartByte of each preproc_def/preproc_trydef node to
+// the column at which its value should start.
+//
+// Only groups of 2+ consecutive defines (no blank lines, no other node types
+// between them, all having a value) get entries. Defines without a value, or
+// runs interrupted by blank lines or other node types, are left out of the map
+// and will be printed verbatim by printPreprocDef.
+func computeDefineAlignments(src []byte, n *sitter.Node) map[uint]int {
+	result := make(map[uint]int)
+
+	type entry struct {
+		startByte uint
+		prefixLen int // len("#!keyword") + 1 + len("IDENTIFIER")
+	}
+
+	var group []entry
+	var prevEnd uint
+
+	flushGroup := func() {
+		if len(group) >= 2 {
+			maxPrefix := 0
+			for _, e := range group {
+				if e.prefixLen > maxPrefix {
+					maxPrefix = e.prefixLen
+				}
+			}
+			alignCol := maxPrefix + 2 // at least 2 spaces between identifier and value
+			for _, e := range group {
+				result[e.startByte] = alignCol
+			}
+		}
+		group = nil
+	}
+
+	for i := range n.ChildCount() {
+		child := n.Child(i)
+		it := innerType(child)
+		isDefine := it == "preproc_def" || it == "preproc_trydef"
+
+		if i > 0 {
+			newlines := srcNewlines(src, prevEnd, child.StartByte())
+			// top_level_item EndByte includes the trailing '\n'; count it.
+			if prevEnd > 0 && src[prevEnd-1] == '\n' {
+				newlines++
+			}
+			// A blank line or a non-define node breaks the current group.
+			if newlines > 1 || !isDefine {
+				flushGroup()
+			}
+		}
+
+		if isDefine {
+			// Unwrap top_level_item to get the actual preproc_def node.
+			actual := child
+			if child.Kind() == "top_level_item" && child.NamedChildCount() > 0 {
+				actual = child.NamedChild(0)
+			}
+			if actual.ChildCount() >= 3 {
+				// Has a value: keyword, identifier, value.
+				kw := string(src[actual.Child(0).StartByte():actual.Child(0).EndByte()])
+				id := string(src[actual.Child(1).StartByte():actual.Child(1).EndByte()])
+				group = append(group, entry{actual.StartByte(), len(kw) + 1 + len(id)})
+			} else {
+				// Value-less define (e.g. "#!define FLAG") breaks alignment.
+				flushGroup()
+			}
+		}
+
+		prevEnd = child.EndByte()
+	}
+	flushGroup()
+
+	return result
 }
 
 // isEosNode returns true when n is a statement-terminator token.

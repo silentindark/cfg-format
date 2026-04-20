@@ -6,13 +6,21 @@ import (
 	"io"
 	"os"
 
-	"cfg-format/formatter"
+	"github.com/IbrahimShahzad/cfg-format/formatter"
 
 	"golang.org/x/term"
 )
 
+// version is set at build time via:
+//
+//	go build -ldflags "-X main.version=v1.2.3"
+//
+// Falls back to "dev" for local builds that skip the flag.
+var version = "dev"
+
 func main() {
 	var (
+		showVersion  = flag.Bool("version", false, "print version and exit")
 		writeInPlace = flag.Bool("w", false, "write result back to source file instead of stdout")
 		check        = flag.Bool("check", false, "exit non-zero if any file is not already formatted")
 		dumpTree     = flag.Bool("dump-tree", false, "print the parse tree and exit (debug)")
@@ -26,6 +34,11 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("cfg-format", version)
+		return
+	}
 
 	cfg := formatter.DefaultConfig()
 	if *useSpaces {

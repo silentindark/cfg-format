@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"cfg-format/grammar"
+	"github.com/IbrahimShahzad/cfg-format/grammar"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 )

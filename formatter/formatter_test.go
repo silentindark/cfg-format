@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cfg-format/formatter"
+	"github.com/IbrahimShahzad/cfg-format/formatter"
 )
 
 // TestGolden formats every file in testdata/ and compares the result against
